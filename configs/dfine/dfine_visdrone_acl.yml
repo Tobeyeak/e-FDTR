@@ -1,0 +1,117 @@
+# DFINE VisDrone ACL 平滑渐进版（修复版）
+# 使用方法: python train.py -c configs/dfine/dfine_visdrone_acl_smooth.yml
+#
+# 改进点：
+# 1. 不调度学习率（保持原版flatcosine不衰减）
+# 2. 延迟切换时机（80epoch开始，100epoch完成）
+# 3. 平滑过渡（20epoch渐进过渡，非硬切换）
+# 4. 保守权重调整（避免跳跃过大）
+# 5. 数据增强保持原版148epoch（不与ACL强行同步）
+#
+# 对照组: dfine_hgnetv2_n_custom.yml (原版DFINE)
+
+__include__: [
+  './dfine_hgnetv2_n_custom.yml',
+]
+
+output_dir: ./outputs/dfine_visdrone_acl_smooth
+
+# ==================== 平滑渐进 ACL 配置 ====================
+# 核心改进：延迟切换 + 平滑过渡 + 保守调整
+DEIMCriterion:
+  # 基础配置（与原版完全一致）
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+  losses: ['vfl', 'boxes', 'local']
+  alpha: 0.75
+  gamma: 2.0
+  reg_max: 32
+  
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    alpha: 0.25
+    gamma: 2.0
+  
+  # ========== ACL 阶段1：前80epoch（分类+粗定位）==========
+  # 更保守的初始权重，给后续提升留空间
+  weight_dict_stage1: 
+    loss_vfl: 1.2      # 略增分类权重（原版1.0）
+    loss_bbox: 4.0     # 略降定位权重（原版5.0）
+    loss_giou: 1.8     # 略降定位权重（原版2.0）
+    loss_fgl: 0.15     # 保持
+    loss_ddf: 1.5      # 保持
+  
+  # ========== ACL 阶段2：100epoch后（精确定位）==========
+  # 保守提升（避免原版3x跳跃导致训练不稳定）
+  weight_dict_stage2:
+    loss_vfl: 0.8      # 保守降低（原版0.5太低）
+    loss_bbox: 7.0     # 保守提升40%（原版10.0跳跃233%）
+    loss_giou: 3.0     # 保守提升67%（原版4.0跳跃167%）
+    loss_fgl: 0.25     # 保守提升67%（原版0.3）
+    loss_ddf: 2.0      # 保守提升33%（原版2.5）
+  
+  # ========== 平滑过渡配置（关键改进）==========
+  # 硬切换 → 渐进过渡
+  transition_mode: 'smooth'   # 新增：smooth | hard
+  transition_start: 80        # 80epoch开始过渡
+  transition_end: 100           # 100epoch完成过渡
+  # 80-100epoch期间线性插值：weight = stage1*(1-alpha) + stage2*alpha
+  
+  # gamma渐进调整（配合损失权重）
+  gamma_stage1: 2.2   # 略高，专注难分样本
+  gamma_stage2: 1.5   # 保守降低（原版1.0→2.0跳跃太大）
+  
+  # ========== 匹配器渐进调整（避免匹配混乱）==========
+  # 阶段1：平衡匹配（分类与定位并重）
+  matcher_stage1:
+    cost_class: 2.5    # 略增分类成本
+    cost_bbox: 4.0     # 略降定位成本
+    cost_giou: 1.8     # 略降定位成本
+  
+  # 阶段2：定位主导（保守调整）
+  matcher_stage2:
+    cost_class: 1.5    # 保守降低（原版1.0跳跃太大）
+    cost_bbox: 6.0     # 保守提升50%（原版6.0）
+    cost_giou: 3.0     # 保守提升67%（原版4.0）
+
+# ==================== 学习率调度（不改动！）====================
+# 关键修复：保持原版学习率调度，不衰减
+# 让损失调度独立工作，不干扰学习率
+lrsheduler: flatcosine
+lr_gamma: 1.0
+warmup_iter: 500
+flat_epoch: 4000000    # 保持原版：不衰减（或设为160）
+no_aug_epoch: 0
+
+# ==================== 数据增强（保持原版！）====================
+# 关键修复：不与ACL强行同步，保持原版148epoch
+train_dataloader:
+  total_batch_size: 64
+  dataset:
+    transforms:
+      policy:
+        name: stop_epoch
+        epoch: 148      # 保持原版（不改为60）
+        ops: ['RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
+  
+  collate_fn:
+    type: BatchImageCollateFunction
+    base_size: 640
+    base_size_repeat: ~
+    stop_epoch: 148    # 保持原版（不改为60）
+    ema_restart_decay: 0.9999
+
+  shuffle: True
+  num_workers: 4
+
+# ==================== EMA（保守调整）====================
+# 可选：EMA也跟随ACL渐进调整，但保守
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  warmups: 1000
+  start: 0
+  # 不强制重启EMA，保持稳定性
+  # stage2_decay: 0.9995  # 如需调整，保守改为0.9995
+  # transition_start: 80
+  # transition_end: 100

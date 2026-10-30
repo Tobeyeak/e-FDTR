@@ -1,0 +1,154 @@
+# DEIM VisDrone优化训练策略
+# 针对小目标、类别不平衡数据集的优化配置
+
+# ==================== 数据增强优化 ====================
+# 优化Mosaic：增大output_size减少小目标压缩，降低probability平衡多样性
+train_dataloader:
+  dataset:
+    transforms:
+      ops:
+        # Mosaic优化配置：
+        # - output_size: 480（而非320）→ 每张图更大，拼贴后小目标更清晰
+        # - probability: 0.6（而非1.0/0.5）→ 60%概率使用Mosaic，保留40%原始训练样本
+        # - use_cache: False → 避免缓存导致的样本重复
+        - {type: Mosaic, output_size: 480, rotation_range: 10, translation_range: [0.1, 0.1], 
+           scaling_range: [0.5, 1.5], probability: 0.6, fill_value: 0, use_cache: False, 
+           max_cached_images: 50, random_pop: True}
+        
+        # 基础增强（保持）
+        - {type: RandomZoomOut, fill: 0}
+        - {type: RandomIoUCrop, p: 0.8}
+        
+        # 优化：提高min_size到3，过滤Mosaic后过小的目标（<3像素）
+        - {type: SanitizeBoundingBoxes, min_size: 3}
+        
+        - {type: RandomHorizontalFlip}
+        
+        # 可选：增大分辨率到800×800（如果显存允许）
+        # - {type: Resize, size: [800, 800], }
+        - {type: Resize, size: [640, 640], }
+        
+        # 二次过滤：最终清理
+        - {type: SanitizeBoundingBoxes, min_size: 1}
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+        - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
+      
+      # 策略优化：延长到100epoch再停止Mosaic等增强
+      # VisDrone小目标需要更长时间学习位置信息
+      policy:
+        name: stop_epoch
+        epoch: 100   # 延长到100epoch（原为50/78）
+        ops: ['Mosaic', 'RandomZoomOut', 'RandomIoUCrop']
+      mosaic_prob: 0.6  # 与Mosaic的probability保持一致
+
+  # 优化：移除Mixup和CopyBlend（对小目标数据集效果不佳）
+  collate_fn:
+    type: BatchImageCollateFunction
+    base_size: 640
+    base_size_repeat: 3
+    stop_epoch: 100  # 与policy一致
+    ema_restart_decay: 0.9999
+    # 注意：不配置mixup_prob和mixup_epochs即禁用Mixup
+    # 不配置copyblend_prob和copyblend_epochs即禁用CopyBlend
+
+val_dataloader:
+  dataset:
+    transforms:
+      ops:
+        # 验证分辨率与训练一致
+        - {type: Resize, size: [640, 640], }
+        - {type: ConvertPILImage, dtype: 'float32', scale: True}
+  shuffle: False
+  total_batch_size: 64
+  num_workers: 4
+
+# ==================== 损失函数优化 ====================
+# 关键优化：改用VFL替代MAL，适应VisDrone类别不平衡
+# MAL只优化匹配成功的样本，对少数类不利
+# VFL用IoU作为软标签，自动处理类别不平衡
+DEIMCriterion:
+  # 使用VFL而非MAL（针对类别不平衡优化）
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_fgl: 0.15, loss_ddf: 1.5}
+  losses: ['vfl', 'boxes', 'local']  # 启用vfl替代mal
+  
+  # 调整Focal Loss参数（VisDrone小目标难检测，降低gamma）
+  alpha: 0.75
+  gamma: 1.2  # 从1.5降低到1.2，减少难样本过度抑制
+  reg_max: 32
+  
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    alpha: 0.25
+    gamma: 2.0
+
+# ==================== 学习率调度优化 ====================
+# 延长flat_epoch，更稳定训练
+lrsheduler: flatcosine
+lr_gamma: 0.5       # 从1.0降低到0.5，更保守的衰减
+warmup_iter: 2000
+flat_epoch: 100     # 延长到100（原为29/78），适应小目标收敛慢的特点
+no_aug_epoch: 12
+
+# ==================== 模型配置优化 ====================
+# 保持HGNetv2 B0轻量级 backbone（VisDrone图片较大，不需要太深）
+HGNetv2:
+  name: 'B0'
+  return_idx: [2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+  pretrained: False
+  local_model_dir: ./weight/hgnetv2/
+
+# 轻量级Encoder/Decoder配置（适合小目标）
+HybridEncoder:
+  in_channels: [512, 1024]
+  feat_strides: [16, 32]
+  hidden_dim: 128
+  use_encoder_idx: [1]
+  dim_feedforward: 512
+  expansion: 0.34
+  depth_mult: 0.5
+  act: silu
+
+DFINETransformer:
+  feat_channels: [128, 128]
+  feat_strides: [16, 32]
+  hidden_dim: 128
+  dim_feedforward: 512
+  num_levels: 2
+  num_layers: 3
+  eval_idx: -1
+  num_queries: 300
+  num_denoising: 100
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
+  reg_max: 32
+  reg_scale: 4
+  layer_scale: 1
+  num_points: [6, 6]
+  cross_attn_method: default
+  query_select_method: default
+  activation: silu
+  mlp_act: silu
+
+PostProcessor:
+  num_top_queries: 300
+
+# ==================== 训练超参优化 ====================
+# 160 epoch足够，不需要太长
+epoches: 160
+
+# 评估尺寸与训练一致
+eval_spatial_size: [640, 640]
+
+# 其他配置
+print_freq: 20
+checkpoint_freq: 4
+use_focal_loss: True
+use_ema: True
+ema_decay: 0.9999
+sync_bn: true
+clip_max_norm: 0.1
+find_unused_parameters: true

@@ -1,0 +1,88 @@
+__include__: [
+  '../dataset/custom_detection.yml',
+  # '../dataset/visdrone_detection.yml',
+  '../runtime.yml',
+  '../base/dataloader_dfine.yml',
+  '../base/optimizer.yml',
+  '../base/dfine_hgnetv2.yml',
+]
+
+print_freq: 20
+output_dir: ./outputs/dfine_hgnetv2_n_custom_FAD_DySample
+
+DEIM:
+  backbone: HGNetv2
+  # 使用 DySample 上采样的 FAD
+  encoder: FAD_DySample
+
+HGNetv2:
+  name: 'B0'
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: False
+  use_lab: True
+
+# FAD_DySample 配置 - 使用动态采样上采样
+FAD_DySample:
+  in_channels: [256, 512, 1024]
+  feat_strides: [8, 16, 32]
+  out_strides: [8, 16, 32]
+
+  # 基础配置
+  hidden_dim: 128
+  use_encoder_idx: [2]
+  dim_feedforward: 512
+  depth_mult: 0.5
+  fad_ks: [3, 5, 7, 9]
+
+  # DySample 上采样配置
+  use_dysample: True  # 启用 DySample 上采样
+  dysample_style: 'lp'  # DySample 风格: 'lp' (learning-to-sample) 或 'pl' (pixel-shuffle)
+  dysample_groups: 4  # 分组数
+  dysample_scope: True  # 是否使用动态范围缩放
+
+DFINETransformer:
+  feat_channels: [128, 128, 128]
+  feat_strides: [8, 16, 32]
+  num_levels: 3
+  hidden_dim: 128
+  dim_feedforward: 512
+
+  num_layers: 3
+  eval_idx: -1
+
+  num_points: [3, 6, 3]
+
+optimizer:
+  type: AdamW
+  params:
+    -
+      params: '^(?=.*backbone)(?!.*norm|bn).*$'
+      lr: 0.0004
+    -
+      params: '^(?=.*backbone)(?=.*norm|bn).*$'
+      lr: 0.0004
+      weight_decay: 0.
+    -
+      params: '^(?=.*(?:encoder|decoder))(?=.*(?:norm|bn|bias)).*$'
+      weight_decay: 0.
+
+  lr: 0.0008
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# 训练配置 - 与 n_custom 保持一致
+epoches: 160
+train_dataloader:
+  total_batch_size: 64
+  dataset:
+    transforms:
+      policy:
+        epoch: 148
+  collate_fn:
+    stop_epoch: 148
+    ema_restart_decay: 0.9999
+    base_size_repeat: ~
+
+val_dataloader:
+  total_batch_size: 64
