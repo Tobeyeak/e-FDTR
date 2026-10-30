@@ -210,8 +210,6 @@ CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 train.py \
 
 ## 5. 导出
 
-### 5.1 导出 ONNX
-
 ```bash
 bash A_pipeline/export.sh
 ```
@@ -234,22 +232,8 @@ python export.py -c configs/dfine/e-FDTR-n.yml -r /path/to/best.pth --format onn
 | `--simplify` | 用 onnxslim 精简 ONNX（需 `pip install onnxslim`） |
 | `--opset` | ONNX opset 版本（默认 17） |
 
-输出文件与 checkpoint 同名（`.onnx` / `.engine`）。
 
-### 5.2 导出 TensorRT Engine
 
-改 `export.sh` 里的导出命令：
-```bash
-$PYTHON $EXPORT_PY \
-    -c $CONFIG_FILE \
-    -r $CHECKPOINT \
-    --format engine \
-    --half \
-    --img-size 640 640
-```
-（需先安装 TensorRT）
-
----
 
 ## 6. 推理
 
@@ -278,14 +262,6 @@ python tools/inference/detect/torch_inf.py \
 
 > 推理置信度阈值在 `tools/inference/detect/torch_inf.py` 的 `-t/--thrh`（默认 0.2），需要改阈值时加 `-t 0.5` 到脚本的推理命令里。
 
-### ONNX / TensorRT 推理
-
-```bash
-python tools/inference/detect/onnx_inf.py --onnx model.onnx --input image.jpg
-python tools/inference/detect/trt_inf.py  --trt  model.engine --input image.jpg
-```
-
----
 
 ## 7. 关键配置速查表
 
